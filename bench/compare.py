@@ -13,6 +13,7 @@ import glob
 import json
 import os
 import statistics
+import sys
 
 from common import RESULTS_DIR
 
@@ -37,7 +38,7 @@ def collect(blob):
         elif section.startswith("train_"):
             rows[f"{section} img/s"] = (data["img_per_s"], True)
             rows[f"{section} peak mem (MB)"] = (data["peak_mem_mb"], False)
-            if "breakdown" in data:
+            if isinstance(data.get("breakdown"), dict):
                 rows[f"{section} assign+loss (ms)"] = (data["breakdown"]["assign_and_loss_ms"], False)
         elif section.startswith("video_"):
             for stage in ("capture", "preprocess", "model", "postprocess", "total"):
@@ -98,6 +99,7 @@ def main():
     md = "\n".join(lines)
     md = (f"env {args.base}: {a['env']['git']} / {a['env']['gpu']} / torch {a['env']['torch']}\n\n"
           f"env {args.new}: {b['env']['git']} / {b['env']['gpu']} / torch {b['env']['torch']}\n\n" + md)
+    sys.stdout.reconfigure(encoding="utf-8")  # emoji marks on Windows consoles
     print(md)
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:
