@@ -16,6 +16,12 @@ run() {  # run <tree> <tag> <script> [args...]
         || echo "[ab]   FAILED (see logs)"
 }
 mkdir -p "$BENCH_RESULTS_DIR/logs"
+# the baseline tree usually predates the harness: run the same harness in both trees
+mkdir -p "$A/bench" && cp "$B"/bench/*.py "$A/bench/"
+# share weights and dataset with the baseline tree
+for d in weights datasets/COCO; do
+    [ -e "$A/$d" ] || { mkdir -p "$(dirname "$A/$d")"; ln -s "$B/$d" "$A/$d" 2>/dev/null         || cmd //c mklink //J "$(cygpath -w "$A/$d")" "$(cygpath -w "$B/$d")" > /dev/null; }
+done
 for i in $(seq 1 "$REPS"); do
     for side in A B; do
         tree=$A; [ $side = B ] && tree=$B

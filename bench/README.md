@@ -22,6 +22,23 @@ uv pip install --python .venv/Scripts/python.exe numpy opencv-python loguru tqdm
 # weights -> weights/yolox_s.pth (GitHub release 0.1.1rc0), COCO val2017 + annotations -> datasets/COCO
 ```
 
+### Linux + AMD (ROCm), e.g. RX 7900 XTX
+
+```bash
+# kernel amdgpu driver is enough; user must be in the `render` and `video` groups
+uv venv .venv --python 3.12
+# use the ROCm index that pytorch.org lists for the current torch release
+uv pip install --python .venv/bin/python torch torchvision --index-url https://download.pytorch.org/whl/rocm6.4
+uv pip install --python .venv/bin/python numpy opencv-python loguru tqdm thop tabulate psutil tensorboard pycocotools onnx onnxruntime
+.venv/bin/python -c "import torch; print(torch.version.hip, torch.cuda.get_device_name(0))"
+```
+
+* ROCm keeps the `torch.cuda` API, so all scripts run unchanged; `torch.compile` works (Triton).
+* `cudnn.benchmark` maps to MIOpen, whose first runs tune kernels: keep the warm-ups.
+* ONNX Runtime needs a MIGraphX/ROCm build (AMD's `onnxruntime-migraphx` wheels) for `--ort`;
+  with the plain CPU wheel the variant just reports an error.
+* Re-dump `equiv_ref.pt` on this machine from the baseline commit; GPU numerics differ per vendor.
+
 COCO val2017 is also used as the *training* set for throughput runs: only realistic
 images and boxes are needed, not convergence.
 
@@ -32,8 +49,8 @@ images and boxes are needed, not convergence.
 python bench/check_equiv.py dump --out bench/results/equiv_ref.pt
 # 2. ...change code...
 python bench/check_equiv.py compare --ref bench/results/equiv_ref.pt
-# 3. A/B speed + accuracy (baseline tree e.g. from `git worktree add ../yolox-base main`)
-bash bench/ab.sh ../yolox-base . 3 .venv/Scripts/python.exe
+# 3. A/B speed + accuracy (baseline tree e.g. from `git worktree add ../yolox-base 6ddff48`)
+bash bench/ab.sh ../yolox-base . 3 .venv/Scripts/python.exe   # Linux: .venv/bin/python
 python bench/compare.py A B --out bench/results/compare.md
 ```
 

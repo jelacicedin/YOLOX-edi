@@ -42,6 +42,7 @@ def env_info():
         "python": platform.python_version(),
         "torch": torch.__version__,
         "cuda": torch.version.cuda,
+        "hip": getattr(torch.version, "hip", None),
         "cudnn": torch.backends.cudnn.version(),
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
         "platform": platform.platform(),

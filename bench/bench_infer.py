@@ -70,7 +70,13 @@ def bench_torch(base_model, variant, bs, size, warmup, iters):
 
 def bench_ort(base_model, bs, size, warmup, iters):
     import onnxruntime as ort
-    ort.preload_dlls()
+    if hasattr(ort, "preload_dlls") and torch.version.cuda:
+        ort.preload_dlls()  # CUDA/cuDNN DLLs shipped with torch (Windows)
+    # NVIDIA: CUDA EP; AMD: MIGraphX (ORT >= 1.23) or the older ROCm EP
+    gpu_eps = ["CUDAExecutionProvider", "MIGraphXExecutionProvider", "ROCMExecutionProvider"]
+    providers = [ep for ep in gpu_eps if ep in ort.get_available_providers()][:1]
+    if not providers:
+        return {"error": f"no GPU execution provider in {ort.get_available_providers()}"}
 
     m = fuse_model(copy.deepcopy(base_model).eval())
     m.head.decode_in_inference = False
@@ -78,9 +84,9 @@ def bench_ort(base_model, bs, size, warmup, iters):
     x = torch.randn(bs, 3, size, size, device="cuda")
     torch.onnx.export(m, x, path, opset_version=17, input_names=["images"], output_names=["output"],
                       dynamo=False)
-    sess = ort.InferenceSession(path, providers=["CUDAExecutionProvider"])
-    if "CUDAExecutionProvider" not in sess.get_providers():
-        return {"error": "CUDAExecutionProvider unavailable"}
+    sess = ort.InferenceSession(path, providers=providers)
+    if providers[0] not in sess.get_providers():
+        return {"error": f"{providers[0]} failed to initialise"}
     xb = x.cpu().numpy()
     import time
 
@@ -174,8 +180,8 @@ def main():
                     r["img_per_s"] = bs * 1000.0 / r["median_ms"]
             except Exception as e:
                 r = {"error": repr(e)[:300]}
-            lat[f"ort_cuda_fp32_bs{bs}"] = r
-            print(f"ort_cuda_fp32_bs{bs:<14d} {r}")
+            lat[f"ort_gpu_fp32_bs{bs}"] = r
+            print(f"ort_gpu_fp32_bs{bs:<15d} {r}")
     results["latency"] = lat
     results["e2e"] = bench_e2e(model, exp, args.img, args.warmup, args.iters)
     print("e2e", results["e2e"]["total"], "fps", results["e2e"]["fps"])
