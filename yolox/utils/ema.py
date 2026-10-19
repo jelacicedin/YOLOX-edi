@@ -54,7 +54,12 @@ class ModelEMA:
             msd = (
                 model.module.state_dict() if is_parallel(model) else model.state_dict()
             )  # model state_dict
-            for k, v in self.ema.state_dict().items():
-                if v.dtype.is_floating_point:
-                    v *= d
-                    v += (1.0 - d) * msd[k].detach()
+            if not hasattr(self, "_ema_float"):
+                self._ema_float = [
+                    (k, v) for k, v in self.ema.state_dict().items() if v.dtype.is_floating_point
+                ]
+            ema_vals = [v for _, v in self._ema_float]
+            model_vals = [msd[k].detach() for k, _ in self._ema_float]
+            # multi-tensor kernels instead of two small kernels per tensor
+            torch._foreach_mul_(ema_vals, d)
+            torch._foreach_add_(ema_vals, model_vals, alpha=1.0 - d)

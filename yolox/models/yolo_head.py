@@ -233,17 +233,24 @@ class YOLOXHead(nn.Module):
         return output, grid
 
     def decode_outputs(self, outputs, dtype):
-        grids = []
-        strides = []
-        for (hsize, wsize), stride in zip(self.hw, self.strides):
-            yv, xv = meshgrid([torch.arange(hsize), torch.arange(wsize)])
-            grid = torch.stack((xv, yv), 2).view(1, -1, 2)
-            grids.append(grid)
-            shape = grid.shape[:2]
-            strides.append(torch.full((*shape, 1), stride))
-
-        grids = torch.cat(grids, dim=1).type(dtype)
-        strides = torch.cat(strides, dim=1).type(dtype)
+        # grids are built once per (shapes, dtype, device) directly on the output device,
+        # instead of on the CPU + host-to-device copy on every call
+        key = (tuple(tuple(hw) for hw in self.hw), dtype, outputs.device)
+        if getattr(self, "_decode_cache_key", None) != key:
+            grids = []
+            strides = []
+            for (hsize, wsize), stride in zip(self.hw, self.strides):
+                yv, xv = meshgrid([torch.arange(hsize, device=outputs.device),
+                                   torch.arange(wsize, device=outputs.device)])
+                grid = torch.stack((xv, yv), 2).view(1, -1, 2)
+                grids.append(grid)
+                shape = grid.shape[:2]
+                strides.append(torch.full((*shape, 1), stride, device=outputs.device))
+            self._decode_cache = (
+                torch.cat(grids, dim=1).type(dtype), torch.cat(strides, dim=1).type(dtype)
+            )
+            self._decode_cache_key = key
+        grids, strides = self._decode_cache
 
         outputs = torch.cat([
             (outputs[..., 0:2] + grids) * strides,
@@ -268,7 +275,8 @@ class YOLOXHead(nn.Module):
         cls_preds = outputs[:, :, 5:]  # [batch, n_anchors_all, n_cls]
 
         # calculate targets
-        nlabel = (labels.sum(dim=2) > 0).sum(dim=1)  # number of objects
+        # number of objects, fetched to the host once instead of syncing per image
+        nlabel = (labels.sum(dim=2) > 0).sum(dim=1).tolist()
 
         total_num_anchors = outputs.shape[1]
         x_shifts = torch.cat(x_shifts, 1)  # [1, n_anchors_all]
@@ -287,7 +295,7 @@ class YOLOXHead(nn.Module):
         num_gts = 0.0
 
         for batch_idx in range(outputs.shape[0]):
-            num_gt = int(nlabel[batch_idx])
+            num_gt = nlabel[batch_idx]
             num_gts += num_gt
             if num_gt == 0:
                 cls_target = outputs.new_zeros((0, self.num_classes))
@@ -350,7 +358,6 @@ class YOLOXHead(nn.Module):
                         "cpu",
                     )
 
-                torch.cuda.empty_cache()
                 num_fg += num_fg_img
 
                 cls_target = F.one_hot(
@@ -454,7 +461,6 @@ class YOLOXHead(nn.Module):
         bboxes_preds_per_image = bboxes_preds_per_image[fg_mask]
         cls_preds_ = cls_preds[batch_idx][fg_mask]
         obj_preds_ = obj_preds[batch_idx][fg_mask]
-        num_in_boxes_anchor = bboxes_preds_per_image.shape[0]
 
         if mode == "cpu":
             gt_bboxes_per_image = gt_bboxes_per_image.cpu()
@@ -462,25 +468,28 @@ class YOLOXHead(nn.Module):
 
         pair_wise_ious = bboxes_iou(gt_bboxes_per_image, bboxes_preds_per_image, False)
 
-        gt_cls_per_image = (
-            F.one_hot(gt_classes.to(torch.int64), self.num_classes)
-            .float()
-        )
         pair_wise_ious_loss = -torch.log(pair_wise_ious + 1e-8)
 
         if mode == "cpu":
             cls_preds_, obj_preds_ = cls_preds_.cpu(), obj_preds_.cpu()
 
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.autocast("cuda", enabled=False):
             cls_preds_ = (
                 cls_preds_.float().sigmoid_() * obj_preds_.float().sigmoid_()
             ).sqrt()
-            pair_wise_cls_loss = F.binary_cross_entropy(
-                cls_preds_.unsqueeze(0).repeat(num_gt, 1, 1),
-                gt_cls_per_image.unsqueeze(1).repeat(1, num_in_boxes_anchor, 1),
-                reduction="none"
-            ).sum(-1)
-        del cls_preds_
+            # BCE against a one-hot target summed over classes, without materialising the
+            # [num_gt, num_anchors, num_classes] tensors:
+            #   sum_c bce = -sum_c log(1 - p_c) + log(1 - p_gt) - log(p_gt)
+            # logs are clamped at -100 exactly like F.binary_cross_entropy
+            log_p = torch.log(cls_preds_).clamp_(min=-100)
+            log_1mp = torch.log1p(-cls_preds_).clamp_(min=-100)
+            gt_cls_idx = gt_classes.to(torch.int64)
+            pair_wise_cls_loss = (
+                -log_1mp.sum(-1).unsqueeze(0)
+                + log_1mp.t()[gt_cls_idx]
+                - log_p.t()[gt_cls_idx]
+            )
+        del cls_preds_, log_p, log_1mp
 
         cost = (
             pair_wise_cls_loss
@@ -547,21 +556,26 @@ class YOLOXHead(nn.Module):
         n_candidate_k = min(10, pair_wise_ious.size(1))
         topk_ious, _ = torch.topk(pair_wise_ious, n_candidate_k, dim=1)
         dynamic_ks = torch.clamp(topk_ious.sum(1).int(), min=1)
-        for gt_idx in range(num_gt):
-            _, pos_idx = torch.topk(
-                cost[gt_idx], k=dynamic_ks[gt_idx], largest=False
-            )
-            matching_matrix[gt_idx][pos_idx] = 1
+        # one batched topk for all gts (dynamic_k <= n_candidate_k), keeping the first
+        # dynamic_k ranks per row -- replaces a python loop with one topk per gt
+        _, pos_idx = torch.topk(cost, k=n_candidate_k, dim=1, largest=False)
+        keep = torch.arange(n_candidate_k, device=cost.device)[None] < dynamic_ks[:, None]
+        matching_matrix.scatter_(1, pos_idx, keep.to(matching_matrix.dtype))
 
-        del topk_ious, dynamic_ks, pos_idx
+        del topk_ious, dynamic_ks, pos_idx, keep
 
         anchor_matching_gt = matching_matrix.sum(0)
         # deal with the case that one anchor matches multiple ground-truths
-        if anchor_matching_gt.max() > 1:
-            multiple_match_mask = anchor_matching_gt > 1
-            _, cost_argmin = torch.min(cost[:, multiple_match_mask], dim=0)
-            matching_matrix[:, multiple_match_mask] *= 0
-            matching_matrix[cost_argmin, multiple_match_mask] = 1
+        # (computed unconditionally: cheaper than a device->host sync to test for it)
+        multiple_match_mask = anchor_matching_gt > 1
+        cost_argmin = cost.argmin(0)
+        matching_matrix = torch.where(
+            multiple_match_mask[None],
+            (torch.arange(num_gt, device=cost.device)[:, None] == cost_argmin[None]).to(
+                matching_matrix.dtype
+            ),
+            matching_matrix,
+        )
         fg_mask_inboxes = anchor_matching_gt > 0
         num_fg = fg_mask_inboxes.sum().item()
 
@@ -613,7 +627,8 @@ class YOLOXHead(nn.Module):
         y_shifts = torch.cat(y_shifts, 1)  # [1, n_anchors_all]
         expanded_strides = torch.cat(expanded_strides, 1)
 
-        nlabel = (labels.sum(dim=2) > 0).sum(dim=1)  # number of objects
+        # number of objects, fetched to the host once instead of syncing per image
+        nlabel = (labels.sum(dim=2) > 0).sum(dim=1).tolist()
         for batch_idx, (img, num_gt, label) in enumerate(zip(imgs, nlabel, labels)):
             img = imgs[batch_idx].permute(1, 2, 0).to(torch.uint8)
             num_gt = int(num_gt)

@@ -136,10 +136,19 @@ class SPPBottleneck(nn.Module):
         )
         conv2_channels = hidden_channels * (len(kernel_sizes) + 1)
         self.conv2 = BaseConv(conv2_channels, out_channels, 1, stride=1, act=activation)
+        # SPPF: max-pooling with kernels (5, 9, 13) equals 1, 2 and 3 chained 5x5 poolings,
+        # which is the same output for ~1/3 of the cost (YOLOv5 v6.0).
+        self.sppf = tuple(kernel_sizes) == (5, 9, 13)
 
     def forward(self, x):
         x = self.conv1(x)
-        x = torch.cat([x] + [m(x) for m in self.m], dim=1)
+        if self.sppf:
+            pool = self.m[0]
+            y1 = pool(x)
+            y2 = pool(y1)
+            x = torch.cat([x, y1, y2, pool(y2)], dim=1)
+        else:
+            x = torch.cat([x] + [m(x) for m in self.m], dim=1)
         x = self.conv2(x)
         return x
 
@@ -208,3 +217,27 @@ class Focus(nn.Module):
             dim=1,
         )
         return self.conv(x)
+
+    @torch.no_grad()
+    def reparameterize(self):
+        """Fold space-to-depth + kxk conv into one equivalent 2k x 2k stride-2 conv.
+
+        Only valid for deploy (after Conv-BN fusion), the output is unchanged.
+        """
+        conv = self.conv.conv
+        k = conv.kernel_size[0]
+        if conv.stride != (1, 1) or conv.groups != 1 or k % 2 == 0 or hasattr(self.conv, "bn"):
+            return
+        out_c, in4, _, _ = conv.weight.shape
+        c = in4 // 4
+        new_conv = nn.Conv2d(
+            c, out_c, 2 * k, stride=2, padding=2 * (k // 2), bias=conv.bias is not None
+        ).to(conv.weight.device, conv.weight.dtype).requires_grad_(False)
+        w = new_conv.weight.zero_()
+        # channel groups follow the concat order above: (row offset, col offset)
+        for g, (oy, ox) in enumerate(((0, 0), (1, 0), (0, 1), (1, 1))):
+            w[:, :, oy::2, ox::2] = conv.weight[:, g * c:(g + 1) * c]
+        if conv.bias is not None:
+            new_conv.bias.copy_(conv.bias)
+        self.conv.conv = new_conv
+        self.forward = self.conv.forward

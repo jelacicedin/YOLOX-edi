@@ -44,13 +44,14 @@ class Trainer:
         # training related attr
         self.max_epoch = exp.max_epoch
         self.amp_training = args.fp16
-        self.scaler = torch.cuda.amp.GradScaler(enabled=args.fp16)
+        self.scaler = torch.amp.GradScaler("cuda", enabled=args.fp16)
         self.is_distributed = get_world_size() > 1
         self.rank = get_rank()
         self.local_rank = get_local_rank()
         self.device = "cuda:{}".format(self.local_rank)
         self.use_model_ema = exp.ema
         self.save_history_ckpt = exp.save_history_ckpt
+        self.channels_last = getattr(exp, "channels_last", False)
 
         # data/dataloader related attr
         self.data_type = torch.float16 if args.fp16 else torch.float32
@@ -101,9 +102,11 @@ class Trainer:
         targets = targets.to(self.data_type)
         targets.requires_grad = False
         inps, targets = self.exp.preprocess(inps, targets, self.input_size)
+        if self.channels_last:
+            inps = inps.contiguous(memory_format=torch.channels_last)
         data_end_time = time.time()
 
-        with torch.cuda.amp.autocast(enabled=self.amp_training):
+        with torch.autocast("cuda", enabled=self.amp_training):
             outputs = self.model(inps, targets)
 
         loss = outputs["total_loss"]
@@ -139,6 +142,8 @@ class Trainer:
             "Model Summary: {}".format(get_model_info(model, self.exp.test_size))
         )
         model.to(self.device)
+        if self.channels_last:
+            model.to(memory_format=torch.channels_last)
 
         # solver related init
         self.optimizer = self.exp.get_optimizer(self.args.batch_size)

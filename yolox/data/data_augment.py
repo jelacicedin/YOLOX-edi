@@ -139,11 +139,11 @@ def _mirror(image, boxes, prob=0.5):
     return image, boxes
 
 
-def preproc(img, input_size, swap=(2, 0, 1)):
+def preproc(img, input_size, swap=(2, 0, 1), dtype=np.float32):
     if len(img.shape) == 3:
-        padded_img = np.ones((input_size[0], input_size[1], 3), dtype=np.uint8) * 114
+        padded_img = np.full((input_size[0], input_size[1], 3), 114, dtype=np.uint8)
     else:
-        padded_img = np.ones(input_size, dtype=np.uint8) * 114
+        padded_img = np.full(input_size, 114, dtype=np.uint8)
 
     r = min(input_size[0] / img.shape[0], input_size[1] / img.shape[1])
     resized_img = cv2.resize(
@@ -154,7 +154,7 @@ def preproc(img, input_size, swap=(2, 0, 1)):
     padded_img[: int(img.shape[0] * r), : int(img.shape[1] * r)] = resized_img
 
     padded_img = padded_img.transpose(swap)
-    padded_img = np.ascontiguousarray(padded_img, dtype=np.float32)
+    padded_img = np.ascontiguousarray(padded_img, dtype=dtype)
     return padded_img, r
 
 
@@ -169,7 +169,7 @@ class TrainTransform:
         labels = targets[:, 4].copy()
         if len(boxes) == 0:
             targets = np.zeros((self.max_labels, 5), dtype=np.float32)
-            image, r_o = preproc(image, input_dim)
+            image, r_o = preproc(image, input_dim, dtype=np.uint8)
             return image, targets
 
         image_o = image.copy()
@@ -184,7 +184,7 @@ class TrainTransform:
             augment_hsv(image)
         image_t, boxes = _mirror(image, boxes, self.flip_prob)
         height, width, _ = image_t.shape
-        image_t, r_ = preproc(image_t, input_dim)
+        image_t, r_ = preproc(image_t, input_dim, dtype=np.uint8)
         # boxes [xyxy] 2 [cx,cy,w,h]
         boxes = xyxy2cxcywh(boxes)
         boxes *= r_
@@ -194,7 +194,7 @@ class TrainTransform:
         labels_t = labels[mask_b]
 
         if len(boxes_t) == 0:
-            image_t, r_o = preproc(image_o, input_dim)
+            image_t, r_o = preproc(image_o, input_dim, dtype=np.uint8)
             boxes_o *= r_o
             boxes_t = boxes_o
             labels_t = labels_o

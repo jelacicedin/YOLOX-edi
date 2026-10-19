@@ -93,9 +93,9 @@ class MosaicDetection(Dataset):
                 img, _labels, _, img_id = self._dataset.pull_item(index)
                 h0, w0 = img.shape[:2]  # orig hw
                 scale = min(1. * input_h / h0, 1. * input_w / w0)
-                img = cv2.resize(
-                    img, (int(w0 * scale), int(h0 * scale)), interpolation=cv2.INTER_LINEAR
-                )
+                new_wh = (int(w0 * scale), int(h0 * scale))
+                if new_wh != (w0, h0):  # images are usually already resized by read_img
+                    img = cv2.resize(img, new_wh, interpolation=cv2.INTER_LINEAR)
                 # generate output mosaic image
                 (h, w, c) = img.shape[:3]
                 if i_mosaic == 0:
@@ -169,9 +169,9 @@ class MosaicDetection(Dataset):
         img, cp_labels, _, _ = self._dataset.pull_item(cp_index)
 
         if len(img.shape) == 3:
-            cp_img = np.ones((input_dim[0], input_dim[1], 3), dtype=np.uint8) * 114
+            cp_img = np.full((input_dim[0], input_dim[1], 3), 114, dtype=np.uint8)
         else:
-            cp_img = np.ones(input_dim, dtype=np.uint8) * 114
+            cp_img = np.full(input_dim, 114, dtype=np.uint8)
 
         cp_scale_ratio = min(input_dim[0] / img.shape[0], input_dim[1] / img.shape[1])
         resized_img = cv2.resize(
@@ -228,7 +228,9 @@ class MosaicDetection(Dataset):
         box_labels = cp_bboxes_transformed_np
         labels = np.hstack((box_labels, cls_labels))
         origin_labels = np.vstack((origin_labels, labels))
-        origin_img = origin_img.astype(np.float32)
-        origin_img = 0.5 * origin_img + 0.5 * padded_cropped_img.astype(np.float32)
+        # floor((a + b) / 2) in uint16: bit-identical to the float32 0.5a + 0.5b + truncation
+        origin_img = origin_img.astype(np.uint16)
+        origin_img += padded_cropped_img
+        origin_img >>= 1
 
         return origin_img.astype(np.uint8), origin_labels

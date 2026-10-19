@@ -270,8 +270,10 @@ class Exp(BaseExp):
                 elif hasattr(v, "weight") and isinstance(v.weight, nn.Parameter):
                     pg1.append(v.weight)  # apply decay
 
+            # a single fused CUDA kernel updates all params instead of a kernel per tensor
+            fused = all(p.is_cuda for p in pg0 + pg1 + pg2)
             optimizer = torch.optim.SGD(
-                pg0, lr=lr, momentum=self.momentum, nesterov=True
+                pg0, lr=lr, momentum=self.momentum, nesterov=True, fused=fused
             )
             optimizer.add_param_group(
                 {"params": pg1, "weight_decay": self.weight_decay}

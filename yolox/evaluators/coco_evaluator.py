@@ -292,12 +292,13 @@ class COCOEvaluator:
                 cocoDt = cocoGt.loadRes(tmp)
             try:
                 from yolox.layers import COCOeval_opt as COCOeval
-            except ImportError:
+                cocoEval = COCOeval(cocoGt, cocoDt, annType[1])
+            except (ImportError, RuntimeError, OSError) as e:
+                # the fast op is JIT-compiled C++; without a compiler/ninja fall back
                 from pycocotools.cocoeval import COCOeval
 
-                logger.warning("Use standard COCOeval.")
-
-            cocoEval = COCOeval(cocoGt, cocoDt, annType[1])
+                logger.warning("Use standard COCOeval ({}).".format(str(e).splitlines()[0]))
+                cocoEval = COCOeval(cocoGt, cocoDt, annType[1])
             cocoEval.evaluate()
             cocoEval.accumulate()
             redirect_string = io.StringIO()
