@@ -4,6 +4,7 @@
 import os
 import random
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -314,7 +315,8 @@ class Exp(BaseExp):
             json_file=self.val_ann if not testdev else self.test_ann,
             name="val2017" if not testdev else "test2017",
             img_size=self.test_size,
-            preproc=ValTransform(legacy=legacy),
+            # uint8 until the GPU: the evaluator casts to the model dtype, same values
+            preproc=ValTransform(legacy=legacy, dtype=np.float32 if legacy else np.uint8),
         )
 
     def get_eval_loader(self, batch_size, is_distributed, **kwargs):

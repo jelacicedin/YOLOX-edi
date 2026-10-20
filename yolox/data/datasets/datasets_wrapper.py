@@ -10,6 +10,7 @@ import random
 from abc import ABCMeta, abstractmethod
 from functools import partial, wraps
 from multiprocessing.pool import ThreadPool
+import cv2
 import psutil
 from loguru import logger
 from tqdm import tqdm
@@ -292,6 +293,22 @@ class CacheDataset(Dataset, metaclass=ABCMeta):
             cache_bytes += img.nbytes
         mem_required = cache_bytes * num_imgs / num_samples
         return mem_required
+
+
+def read_image(path, flags=cv2.IMREAD_COLOR):
+    """Same result as cv2.imread(path, flags), including EXIF rotation, but faster.
+
+    cv2.imread reads the file in small chunks, which is slow on Windows; reading the bytes
+    in one call and decoding them with cv2.imdecode gives the identical image. Like
+    cv2.imread, returns None when the file is missing or cannot be decoded. Also works with
+    non-ASCII paths, which cv2.imread does not on Windows.
+    """
+    try:
+        with open(path, "rb") as f:
+            buf = f.read()
+    except OSError:
+        return None
+    return cv2.imdecode(np.frombuffer(buf, np.uint8), flags)
 
 
 def cache_read_img(use_cache=True):

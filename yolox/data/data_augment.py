@@ -146,6 +146,10 @@ def _mirror(image, boxes, prob=0.5):
 
 
 def preproc(img, input_size, swap=(2, 0, 1), dtype=np.float32):
+    if img.ndim == 3 and img.dtype == np.uint8 and img.shape[:2] == tuple(input_size[:2]):
+        # already the target size (e.g. every mosaic output): the resize is a no-op and the
+        # padding is fully overwritten, so skip both copies
+        return np.ascontiguousarray(img.transpose(swap), dtype=dtype), 1.0
     if len(img.shape) == 3:
         padded_img = np.full((input_size[0], input_size[1], 3), 114, dtype=np.uint8)
     else:
@@ -234,13 +238,17 @@ class ValTransform:
         data
     """
 
-    def __init__(self, swap=(2, 0, 1), legacy=False):
+    def __init__(self, swap=(2, 0, 1), legacy=False, dtype=np.float32):
         self.swap = swap
         self.legacy = legacy
+        # np.uint8 keeps images 4x smaller until they reach the GPU (cast there); only valid
+        # without the legacy normalisation, whose output is not integer
+        assert dtype == np.float32 or not legacy, "legacy ValTransform needs float32"
+        self.dtype = dtype
 
     # assume input is cv2 img for now
     def __call__(self, img, res, input_size):
-        img, _ = preproc(img, input_size, self.swap)
+        img, _ = preproc(img, input_size, self.swap, dtype=self.dtype)
         if self.legacy:
             img = img[::-1, :, :].copy()
             img /= 255.0

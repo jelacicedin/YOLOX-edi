@@ -16,7 +16,7 @@ import numpy as np
 
 from yolox.evaluators.voc_eval import voc_eval
 
-from .datasets_wrapper import CacheDataset, cache_read_img
+from .datasets_wrapper import CacheDataset, cache_read_img, read_image
 from .voc_classes import VOC_CLASSES
 
 
@@ -178,13 +178,13 @@ class VOCDetection(CacheDataset):
             img,
             (int(img.shape[1] * r), int(img.shape[0] * r)),
             interpolation=cv2.INTER_LINEAR,
-        ).astype(np.uint8)
+        ).astype(np.uint8, copy=False)
 
         return resized_img
 
     def load_image(self, index):
         img_id = self.ids[index]
-        img = cv2.imread(self._imgpath % img_id, cv2.IMREAD_COLOR)
+        img = read_image(self._imgpath % img_id, cv2.IMREAD_COLOR)
         assert img is not None, f"file named {self._imgpath % img_id} not found"
 
         return img
