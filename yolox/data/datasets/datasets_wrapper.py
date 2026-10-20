@@ -4,6 +4,7 @@
 
 import bisect
 import copy
+import multiprocessing
 import os
 import random
 from abc import ABCMeta, abstractmethod
@@ -162,8 +163,8 @@ class CacheDataset(Dataset, metaclass=ABCMeta):
             self.cache_dir = os.path.join(data_dir, cache_dir_name)
             self.path_filename = path_filename
 
-        if self.cache and self.cache_type == "ram":
-            self.imgs = None
+        # set for every cache type: cache_images() tests it ("disk" used to raise AttributeError)
+        self.imgs = None
 
         if self.cache:
             self.cache_images(
@@ -219,9 +220,25 @@ class CacheDataset(Dataset, metaclass=ABCMeta):
             if self.cache_type == 'ram':
                 self.imgs = [None] * num_imgs
                 logger.info("You are using cached images in RAM to accelerate training!")
+                if multiprocessing.get_start_method() != "fork":
+                    logger.warning(
+                        "Dataloader workers are spawned, not forked: every worker receives "
+                        "its own copy of the RAM cache. Prefer --cache disk, which the OS page "
+                        "cache shares between workers."
+                    )
             else:   # 'disk'
-                if not os.path.exists(self.cache_dir):
-                    os.mkdir(self.cache_dir)
+                # the marker is written only after every image is cached, so an interrupted
+                # run or a different image size / dataset rebuilds instead of reading stale files
+                marker = os.path.join(self.cache_dir, ".complete")
+                expected = f"{num_imgs} {tuple(self.input_dim)}"
+                found = None
+                if os.path.exists(marker):
+                    with open(marker) as f:
+                        found = f.read().strip()
+                if found != expected:
+                    os.makedirs(self.cache_dir, exist_ok=True)
+                    if os.path.exists(marker):
+                        os.remove(marker)
                     logger.warning(
                         f"\n*******************************************************************\n"
                         f"You are using cached images in DISK to accelerate training.\n"
@@ -250,14 +267,22 @@ class CacheDataset(Dataset, metaclass=ABCMeta):
                 if self.cache_type == 'ram':
                     self.imgs[i] = x
                 else:   # 'disk'
-                    cache_filename = f'{self.path_filename[i].split(".")[0]}.npy'
-                    cache_path_filename = os.path.join(self.cache_dir, cache_filename)
+                    cache_path_filename = self._disk_cache_path(i)
                     os.makedirs(os.path.dirname(cache_path_filename), exist_ok=True)
                     np.save(cache_path_filename, x)
                 b += x.nbytes
                 pbar.desc = \
                     f'Caching images ({b / gb:.1f}/{mem_required / gb:.1f}GB {self.cache_type})'
             pbar.close()
+            if self.cache_type == "disk":
+                with open(marker, "w") as f:
+                    f.write(expected)
+
+    def _disk_cache_path(self, index):
+        # splitext, not split("."): file names / sub-directories may contain dots
+        return os.path.join(
+            self.cache_dir, os.path.splitext(self.path_filename[index])[0] + ".npy"
+        )
 
     def cal_cache_occupy(self, num_imgs):
         cache_bytes = 0
@@ -288,9 +313,7 @@ def cache_read_img(use_cache=True):
                     img = self.imgs[index]
                     img = copy.deepcopy(img)
                 elif self.cache_type == "disk":
-                    img = np.load(
-                        os.path.join(
-                            self.cache_dir, f"{self.path_filename[index].split('.')[0]}.npy"))
+                    img = np.load(self._disk_cache_path(index))
                 else:
                     raise ValueError(f"Unknown cache type: {self.cache_type}")
             else:

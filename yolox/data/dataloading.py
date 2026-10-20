@@ -6,6 +6,7 @@ import os
 import random
 import uuid
 
+import cv2
 import numpy as np
 
 import torch
@@ -107,6 +108,9 @@ def list_collate(batch):
 
 
 def worker_init_reset_seed(worker_id):
+    # spawned workers (Windows / macOS) don't inherit configure_module(): without this each
+    # worker runs OpenCV with one thread per core and N workers oversubscribe the CPU
+    cv2.setNumThreads(0)
     seed = uuid.uuid4().int % 2**32
     random.seed(seed)
     torch.set_rng_state(torch.manual_seed(seed).get_state())

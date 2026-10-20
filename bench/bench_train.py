@@ -47,6 +47,10 @@ def make_trainer(args):
     targv = ["-n", args.name, "-b", str(args.batch), "-expn", args.tag]
     if args.fp16:
         targv.append("--fp16")
+    if args.cache:
+        targv += ["--cache", args.cache]
+        # as tools/train.py: the cached dataset is built before the trainer
+        exp.dataset = exp.get_dataset(cache=True, cache_type=args.cache)
     ckpt = args.ckpt or default_ckpt(args.name)
     if ckpt:
         targv += ["-c", ckpt]
@@ -104,6 +108,8 @@ def main():
     parser.add_argument("--multiscale", action="store_true")
     parser.add_argument("--breakdown", action="store_true")
     parser.add_argument("--channels-last", action="store_true")
+    parser.add_argument("--cache", choices=["ram", "disk"], default=None,
+                        help="cache decoded+resized images, as tools/train.py --cache")
     parser.add_argument("--extra", default="", help="extra args passed to tools/train.py parser")
     args = parser.parse_args()
 
@@ -113,7 +119,8 @@ def main():
     exp, trainer = make_trainer(args)
 
     if args.mode == "data":
-        loader = exp.get_data_loader(batch_size=args.batch, is_distributed=False)
+        loader = exp.get_data_loader(batch_size=args.batch, is_distributed=False,
+                                     cache_img=args.cache)
         it = iter(loader)
         for _ in range(args.warmup):
             next(it)
@@ -123,7 +130,9 @@ def main():
         dt = time.perf_counter() - t0
         res = {"img_per_s": args.iters * args.batch / dt, "ms_per_batch": dt / args.iters * 1000}
         print(res)
-        save_results(args.tag, f"train_data_{args.name}_w{args.workers}", {**vars(args), **res})
+        suffix = f"_cache{args.cache}" if args.cache else ""
+        save_results(args.tag, f"train_data_{args.name}_w{args.workers}{suffix}",
+                     {**vars(args), **res})
         return
 
     trainer.before_train()
@@ -157,6 +166,8 @@ def main():
         }
     print(res)
     suffix = "_cl" if args.channels_last else ""
+    suffix += f"_w{args.workers}" if args.mode == "full" and args.workers != 4 else ""
+    suffix += f"_cache{args.cache}" if args.cache else ""
     save_results(args.tag, f"train_{args.mode}_{args.name}_bs{args.batch}{suffix}", {**vars(args), **res})
     sys.stdout.flush()
     os._exit(0)  # don't wait on dataloader workers / tensorboard
